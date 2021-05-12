@@ -33,6 +33,7 @@ Thread t;
 int16_t pDataXYZ[3] = {0};
 int idR[32] = {0};
 int indexR = 0;
+int flag;
 
 WiFiInterface *wifi;
 volatile int message_num = 0;
@@ -58,8 +59,8 @@ void publish_message(MQTT::Client<MQTTNetwork, Countdown>* client) {
     message_num++;
     MQTT::Message message;
     char buff[100];
-    int16_t pDataXYZ[3] = {0};
-
+    sprintf(buff,"%d",flag);
+    sprintf(buff,"%d",message_num);
     message.qos = MQTT::QOS0;
     message.retained = false;
     message.dup = false;
@@ -111,7 +112,7 @@ void classify(){
   detect_angle = acos(C)*180.0/3.14159265358;
   if(detect_angle>30) flag = 1;
   else flag = 0; 
-  sprintf(buff,"%d",flag);
+  //sprintf(buff,"%d",flag);
   ThisThread::sleep_for(100ms);
 }
 void record(void) {
@@ -213,11 +214,12 @@ int gesture() {
     gesture_index = PredictGesture(interpreter->output(0)->data.f);
     should_clear_buffer = gesture_index < label_num;
     if (gesture_index < label_num) { 
+      uLCD.printf("%d",gesture_index);
       error_reporter->Report(config.output_message[gesture_index]);
-      
-
+      ThisThread::sleep_for(100ms);
     }
   }
+  
 void ACCcapture(){
   eventqueue.call(&ACCcapture_func);
 }
@@ -231,8 +233,6 @@ int main(int argc, char* argv[]) {
             printf("ERROR: No WiFiInterface found.\r\n");
             return -1;
     }
-
-
     printf("\nConnecting to %s...\r\n", MBED_CONF_APP_WIFI_SSID);
     int ret = wifi->connect(MBED_CONF_APP_WIFI_SSID, MBED_CONF_APP_WIFI_PASSWORD, NSAPI_SECURITY_WPA_WPA2);
     if (ret != 0) {
@@ -265,7 +265,6 @@ int main(int argc, char* argv[]) {
     if (client.subscribe(topic, MQTT::QOS0, messageArrived) != 0){
             printf("Fail to subscribe\r\n");
     }
-
     mqtt_thread.start(callback(&mqtt_queue, &EventQueue::dispatch_forever));
     btn2.rise(mqtt_queue.event(&publish_message, &client));
 
@@ -274,22 +273,18 @@ int main(int argc, char* argv[]) {
             client.yield(100);
             ++num;
     }
-
     while (1) {
             if (closed) break;
             client.yield(500);
             ThisThread::sleep_for(500ms);
     }
-
     printf("Ready to close MQTT Network......\n");
-
     if ((rc = client.unsubscribe(topic)) != 0) {
-            printf("Failed: rc from unsubscribe was %d\n", rc);
+      printf("Failed: rc from unsubscribe was %d\n", rc);
     }
     if ((rc = client.disconnect()) != 0) {
     printf("Failed: rc from disconnect was %d\n", rc);
     }
-
     mqttNetwork.disconnect();
     printf("Successfully closed!\n");
 
@@ -313,7 +308,5 @@ int main(int argc, char* argv[]) {
         RPC::call(buf, outbuf);
         printf("%s\r\n", outbuf);
     }  
-
-
     return 0;
 }
