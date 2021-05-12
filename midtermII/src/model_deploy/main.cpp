@@ -14,6 +14,7 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/version.h"
+#include <math.h>
 
 BufferedSerial pc(USBTX, USBRX);
 void ACCcapture(Arguments *in, Reply *out);
@@ -22,14 +23,17 @@ double x, y;
 Thread thread;
 EventQueue eventqueue;
 int16_t pDataXYZ[3] = {0};
+
 constexpr int kTensorArenaSize = 60 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
+
 InterruptIn btn2(USER_BUTTON);
 EventQueue queue(32 * EVENTS_EVENT_SIZE);
 Thread t;
 int16_t pDataXYZ[3] = {0};
 int idR[32] = {0};
 int indexR = 0;
+
 WiFiInterface *wifi;
 volatile int message_num = 0;
 volatile int arrivedcount = 0;
@@ -37,6 +41,7 @@ volatile bool closed = false;
 const char* topic = "Mbed";
 Thread mqtt_thread(osPriorityHigh);
 EventQueue mqtt_queue;
+
 void messageArrived(MQTT::MessageData& md) {
     MQTT::Message &message = md.message;
     char msg[300];
@@ -54,9 +59,7 @@ void publish_message(MQTT::Client<MQTTNetwork, Countdown>* client) {
     MQTT::Message message;
     char buff[100];
     int16_t pDataXYZ[3] = {0};
-    BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-    sprintf(buff,"%d, %d, %d \n", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
-    ThisThread::sleep_for(500ms);
+
     message.qos = MQTT::QOS0;
     message.retained = false;
     message.dup = false;
@@ -98,10 +101,23 @@ int PredictGesture(float* output) {
   return this_predict;
 }
 
-
+void classify(){
+  double A;
+  double B;
+  double C;
+  A = sqrt(refDataXYZ[0]*refDataXYZ[0] + refDataXYZ[1]*refDataXYZ[1] + refDataXYZ[2]*refDataXYZ[2]);
+  B = sqrt(pDataXYZ[0]*pDataXYZ[0] + pDataXYZ[1]*pDataXYZ[1] + pDataXYZ[2]*pDataXYZ[2]);
+  C = ((refDataXYZ[0]*pDataXYZ[0] + refDataXYZ[1]*pDataXYZ[1] + refDataXYZ[2]*pDataXYZ[2])/A/B);
+  detect_angle = acos(C)*180.0/3.14159265358;
+  if(detect_angle>30) flag = 1;
+  else flag = 0; 
+  sprintf(buff,"%d",flag);
+  ThisThread::sleep_for(100ms);
+}
 void record(void) {
    BSP_ACCELERO_AccGetXYZ(pDataXYZ);
    printf("%d, %d, %d\n", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
+   classify();
 }
 
 void startRecord(void) {
@@ -118,34 +134,21 @@ void stopRecord(void) {
 void ACCcapture_func(){
    printf("Start accelerometer init\n");
    BSP_ACCELERO_Init();
-   t.start(callback(&queue, &EventQueue::dispatch_forever));
-   btn2.fall(queue.event(startRecord));
-   btn2.rise(queue.event(stopRecord));
-}
-void classify(){
-  double A;
-  double B;
-  double C;
-  for(int i = 0; i < 10; i++){
+  for(int i = 0; i < 5; i++){
     BSP_ACCELERO_AccGetXYZ(pDataXYZ);
     refDataXYZ[0] += pDataXYZ[0];
     refDataXYZ[1] += pDataXYZ[1];
     refDataXYZ[2] += pDataXYZ[2];
     ThisThread::sleep_for(100ms);
   }
-  refDataXYZ[0] = refDataXYZ[0]/10;
-  refDataXYZ[1] = refDataXYZ[1]/10;
-  refDataXYZ[2] = refDataXYZ[2]/10;
-  BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-  A = sqrt(refDataXYZ[0]*refDataXYZ[0] + refDataXYZ[1]*refDataXYZ[1] + refDataXYZ[2]*refDataXYZ[2]);
-  B = sqrt(pDataXYZ[0]*pDataXYZ[0] + pDataXYZ[1]*pDataXYZ[1] + pDataXYZ[2]*pDataXYZ[2]);
-  C = ((refDataXYZ[0]*pDataXYZ[0] + refDataXYZ[1]*pDataXYZ[1] + refDataXYZ[2]*pDataXYZ[2])/A/B);
-  detect_angle = acos(C)*180.0/3.14159265358;
-  if(detect_angle>30) flag = 1;
-  else flag = 0; 
-  sprintf(buff,"%d",flag);
-  ThisThread::sleep_for(100ms);
+  refDataXYZ[0] = refDataXYZ[0]/5;
+  refDataXYZ[1] = refDataXYZ[1]/5;
+  refDataXYZ[2] = refDataXYZ[2]/5;
+   t.start(callback(&queue, &EventQueue::dispatch_forever));
+   btn2.fall(queue.event(startRecord));
+   btn2.rise(queue.event(stopRecord));
 }
+
 
 int gesture() {
   bool should_clear_buffer = false;
@@ -209,12 +212,10 @@ int gesture() {
     }
     gesture_index = PredictGesture(interpreter->output(0)->data.f);
     should_clear_buffer = gesture_index < label_num;
-    if(gesture_index==0) sprintf(buff,"ring");
-    else if(gesture_index==1) sprintf(buff,"slope");
-    else if (gesture_index==2) sprintf(buff,"up");
-    else sprintf(buff,"negative");
     if (gesture_index < label_num) { 
       error_reporter->Report(config.output_message[gesture_index]);
+      
+
     }
   }
 void ACCcapture(){
