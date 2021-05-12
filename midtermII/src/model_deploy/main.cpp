@@ -1,4 +1,6 @@
-
+#include "MQTTNetwork.h"
+#include "MQTTmbed.h"
+#include "MQTTClient.h"
 #include "mbed.h"
 #include "mbed_rpc.h"
 #include "stm32l475e_iot01_accelero.h"
@@ -22,13 +24,53 @@ EventQueue eventqueue;
 int16_t pDataXYZ[3] = {0};
 constexpr int kTensorArenaSize = 60 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
-InterruptIn btnRecord(USER_BUTTON);
+InterruptIn btn2(USER_BUTTON);
 EventQueue queue(32 * EVENTS_EVENT_SIZE);
 Thread t;
 int16_t pDataXYZ[3] = {0};
 int idR[32] = {0};
 int indexR = 0;
+WiFiInterface *wifi;
+volatile int message_num = 0;
+volatile int arrivedcount = 0;
+volatile bool closed = false;
+const char* topic = "Mbed";
+Thread mqtt_thread(osPriorityHigh);
+EventQueue mqtt_queue;
+void messageArrived(MQTT::MessageData& md) {
+    MQTT::Message &message = md.message;
+    char msg[300];
+    sprintf(msg, "Message arrived: QoS%d, retained %d, dup %d, packetID %d\r\n", message.qos, message.retained, message.dup, message.id);
+    printf(msg);
+    ThisThread::sleep_for(1000ms);
+    char payload[300];
+    sprintf(payload, "Payload %.*s\r\n", message.payloadlen, (char*)message.payload);
+    printf(payload);
+    ++arrivedcount;
+}
 
+void publish_message(MQTT::Client<MQTTNetwork, Countdown>* client) {
+    message_num++;
+    MQTT::Message message;
+    char buff[100];
+    int16_t pDataXYZ[3] = {0};
+    BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+    sprintf(buff,"%d, %d, %d \n", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
+    ThisThread::sleep_for(500ms);
+    message.qos = MQTT::QOS0;
+    message.retained = false;
+    message.dup = false;
+    message.payload = (void*) buff;
+    message.payloadlen = strlen(buff) + 1;
+    int rc = client->publish(topic, message);
+
+    printf("rc:  %d\r\n", rc);
+    printf("Puslish message: %s\r\n", buff);
+}
+
+void close_mqtt() {
+    closed = true;
+}
 int PredictGesture(float* output) {
   static int continuous_count = 0;
   static int last_predict = -1;
@@ -77,8 +119,8 @@ void ACCcapture_func(){
    printf("Start accelerometer init\n");
    BSP_ACCELERO_Init();
    t.start(callback(&queue, &EventQueue::dispatch_forever));
-   btnRecord.fall(queue.event(startRecord));
-   btnRecord.rise(queue.event(stopRecord));
+   btn2.fall(queue.event(startRecord));
+   btn2.rise(queue.event(stopRecord));
 }
 void classify(){
   double A;
@@ -108,8 +150,6 @@ void classify(){
 int gesture() {
   bool should_clear_buffer = false;
   bool got_data = false;
-  gesture = true;
-  myled3 = 1;
   int gesture_index;
   static tflite::MicroErrorReporter micro_error_reporter;
   tflite::ErrorReporter* error_reporter = &micro_error_reporter;
@@ -169,6 +209,10 @@ int gesture() {
     }
     gesture_index = PredictGesture(interpreter->output(0)->data.f);
     should_clear_buffer = gesture_index < label_num;
+    if(gesture_index==0) sprintf(buff,"ring");
+    else if(gesture_index==1) sprintf(buff,"slope");
+    else if (gesture_index==2) sprintf(buff,"up");
+    else sprintf(buff,"negative");
     if (gesture_index < label_num) { 
       error_reporter->Report(config.output_message[gesture_index]);
     }
@@ -180,6 +224,73 @@ void ACCcapture(){
 int main(int argc, char* argv[]) {
 
     thread.start(callback(&eventqueue, &EventQueue::dispatch_forever));
+
+        wifi = WiFiInterface::get_default_instance();
+    if (!wifi) {
+            printf("ERROR: No WiFiInterface found.\r\n");
+            return -1;
+    }
+
+
+    printf("\nConnecting to %s...\r\n", MBED_CONF_APP_WIFI_SSID);
+    int ret = wifi->connect(MBED_CONF_APP_WIFI_SSID, MBED_CONF_APP_WIFI_PASSWORD, NSAPI_SECURITY_WPA_WPA2);
+    if (ret != 0) {
+            printf("\nConnection error: %d\r\n", ret);
+            return -1;
+    }
+    NetworkInterface* net = wifi;
+    MQTTNetwork mqttNetwork(net);
+    MQTT::Client<MQTTNetwork, Countdown> client(mqttNetwork);
+    const char* host = "192.168.98.155";
+    printf("Connecting to TCP network...\r\n");
+    SocketAddress sockAddr;
+    sockAddr.set_ip_address(host);
+    sockAddr.set_port(1883);
+    printf("address is %s/%d\r\n", (sockAddr.get_ip_address() ? sockAddr.get_ip_address() : "None"),  (sockAddr.get_port() ? sockAddr.get_port() : 0) );
+    int rc = mqttNetwork.connect(sockAddr);
+    if (rc != 0) {
+            printf("Connection error.");
+            return -1;
+    }
+    printf("Successfully connected!\r\n");
+    BSP_ACCELERO_Init();
+    MQTTPacket_connectData data = MQTTPacket_connectData_initializer;
+    data.MQTTVersion = 3;
+    data.clientID.cstring = "Mbed";
+
+    if ((rc = client.connect(data)) != 0){
+            printf("Fail to connect MQTT\r\n");
+    }
+    if (client.subscribe(topic, MQTT::QOS0, messageArrived) != 0){
+            printf("Fail to subscribe\r\n");
+    }
+
+    mqtt_thread.start(callback(&mqtt_queue, &EventQueue::dispatch_forever));
+    btn2.rise(mqtt_queue.event(&publish_message, &client));
+
+    int num = 0;
+    while (num != 5) {
+            client.yield(100);
+            ++num;
+    }
+
+    while (1) {
+            if (closed) break;
+            client.yield(500);
+            ThisThread::sleep_for(500ms);
+    }
+
+    printf("Ready to close MQTT Network......\n");
+
+    if ((rc = client.unsubscribe(topic)) != 0) {
+            printf("Failed: rc from unsubscribe was %d\n", rc);
+    }
+    if ((rc = client.disconnect()) != 0) {
+    printf("Failed: rc from disconnect was %d\n", rc);
+    }
+
+    mqttNetwork.disconnect();
+    printf("Successfully closed!\n");
 
     char buf[256], outbuf[256];
     FILE *devin = fdopen(&pc, "r");
@@ -201,4 +312,7 @@ int main(int argc, char* argv[]) {
         RPC::call(buf, outbuf);
         printf("%s\r\n", outbuf);
     }  
+
+
+    return 0;
 }
