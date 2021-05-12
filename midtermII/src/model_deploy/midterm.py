@@ -72,10 +72,7 @@ y = np.arange(0,1)
 
 
 for x in range(0, 10):
-    line=s.readline() # Read an echo string from B_L4S5I_IOT01A terminated with '\n'
-    sequence = s.readline()
-    # print line
-    y[x] = float(line)
+    y[x] = data[x]
 
 fig,ax = plt.subplots(2, 1)
 fig.suptitle("If the detected angle is larger than the threashold angle")
